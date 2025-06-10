@@ -14,11 +14,14 @@ CORS(app) # Activez CORS pour toutes les requêtes
 # Configuration de l'API Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
+    # Pour un déploiement sur Render, Render doit fournir cette variable.
+    # Pour un test local, décommentez et mettez votre clé ici (NE PAS PUSHER SUR GITHUB)
+    # GEMINI_API_KEY = "VOTRE_CLE_API_GEMINI_ICI"
     raise ValueError("GEMINI_API_KEY is not set in environment variables.")
 genai.configure(api_key=GEMINI_API_KEY)
 
-# URL de l'API LuxASR
-LUX_ASR_API_URL = "https://luxasr.uni.lu/api/recognize_file/"
+# URL de l'API LuxASR (MISE À JOUR VERS LA V2 !)
+LUX_ASR_API_URL = "https://luxasr.uni.lu/v2/asr"
 
 # URL CONFIRMÉE de l'API Hugging Face Piper LU TTS
 PIPER_LU_TTS_API_URL = "https://mbarnig-rhasspy-piper-lu-streaming.hf.space/run/predict"
@@ -41,8 +44,6 @@ def call_gemini_api_lux(prompt_text):
         model = genai.GenerativeModel('gemini-1.5-flash')
         chat = model.start_chat(history=[])
 
-        # Prompt simplifié pour obtenir une réponse en luxembourgeois
-        # On inclut une instruction de fallback si le luxembourgeois est difficile.
         prompt_for_gemini = (
             f"La question est : '{prompt_text}'. "
             f"Réponds à cette question en t'adressant à un jeune adolescent, sois concis et utile. "
@@ -71,7 +72,7 @@ def get_luxembourgish_tts(text_luxembourgish):
         headers = {"Content-Type": "application/json"}
 
         response = requests.post(PIPER_LU_TTS_API_URL, json=payload, headers=headers)
-        response.raise_for_status()
+        response.raise_for_status() # Lève une exception pour les codes d'état HTTP d'erreur
 
         result_data = response.json()
         if result_data and result_data.get('data') and len(result_data['data']) > 0:
@@ -117,25 +118,74 @@ def process_audio():
         if use_luxasr_flag == 'true': # On utilise toujours LuxASR ici
             print(f"Backend - Reçu audio pour LuxASR (langue assumée: {input_language_from_frontend})...")
             try:
-                files = {'audio': (audio_file.filename, audio_file.read(), audio_file.mimetype)}
-                response_luxasr = requests.post(LUX_ASR_API_URL, files=files)
-                response_luxasr.raise_for_status()
+                # Lire le contenu binaire du fichier audio
+                audio_content = audio_file.read()
+
+                # Déterminer le MIME type basé sur le nom du fichier
+                filename = audio_file.filename if audio_file.filename else "audio.wav"
+                ext = filename.lower()
+                if ext.endswith(".wav"):
+                    mime_type = "audio/wav"
+                elif ext.endswith(".mp3"):
+                    mime_type = "audio/mpeg"
+                elif ext.endswith(".m4a"):
+                    mime_type = "audio/mp4"
+                else:
+                    mime_type = "application/octet-stream"
+
+                # Créer le dictionnaire 'files' pour requests.post
+                files = {
+                    'audio_file': (filename, audio_content, mime_type)
+                }
+
+                # Préparer les paramètres de requête pour l'API LuxASR v2
+                params = {
+                    "diarization": "Disabled",
+                    "outfmt": "json" # Demander la sortie JSON pour une extraction facile
+                }
+                headers = {
+                    "accept": "application/json"
+                }
+
+                # Envoyer la requête à la nouvelle URL LuxASR avec les paramètres
+                response_luxasr = requests.post(LUX_ASR_API_URL, params=params, headers=headers, files=files)
+                response_luxasr.raise_for_status() # Lève une exception pour les codes d'état HTTP d'erreur
 
                 luxasr_result = response_luxasr.json()
-                transcribed_text = luxasr_result.get('recognized_text', 'Erreur LuxASR: Pas de texte reconnu.')
+                
+                # Extrait le texte transcrit du JSON de LuxASR.
+                # La structure exacte peut varier, nous supposons 'text' ou 'recognized_text'
+                transcribed_text = ""
+                if 'text' in luxasr_result:
+                    transcribed_text = luxasr_result['text']
+                elif 'recognized_text' in luxasr_result: # Au cas où une autre clé serait utilisée
+                    transcribed_text = luxasr_result['recognized_text']
+                elif 'segments' in luxasr_result and isinstance(luxasr_result['segments'], list):
+                    # Si la réponse est une liste de segments avec du texte à l'intérieur
+                    transcribed_text = " ".join([s['text'] for s in luxasr_result['segments'] if 'text' in s])
+                
+                if not transcribed_text:
+                    transcribed_text = "Erreur LuxASR: Pas de texte reconnu ou format inattendu."
+
+
                 print(f"LuxASR Transcription: {transcribed_text}")
-                gemini_response = call_gemini_api_lux(transcribed_text) # Utilise la fonction simplifiée
+                
+                # Si LuxASR n'a rien transcrit, ne pas appeler Gemini avec une chaîne vide
+                if transcribed_text == "Erreur LuxASR: Pas de texte reconnu ou format inattendu." or not transcribed_text.strip():
+                    gemini_response = "Désolé, je n'ai pas pu transcrire votre demande."
+                else:
+                    gemini_response = call_gemini_api_lux(transcribed_text)
 
             except requests.exceptions.RequestException as e:
                 print(f"Erreur d'appel à LuxASR : {e}")
                 transcribed_text = "Erreur de transcription LuxASR."
-                gemini_response = "Désolé, je n'ai pas pu transcrire votre demande."
+                gemini_response = f"Désolé, je n'ai pas pu transcrire votre demande en raison d'une erreur LuxASR : {e}"
             except Exception as e:
                 print(f"Erreur inattendue LuxASR : {e}")
                 transcribed_text = "Erreur inattendue de transcription LuxASR."
-                gemini_response = "Désolé, une erreur est survenue lors du traitement."
+                gemini_response = f"Désolé, une erreur inattendue est survenue lors du traitement : {e}"
         else:
-            return jsonify({"error": "Audio reçu mais LuxASR n'est pas activé ou la langue n'est pas le luxembourgeois."}), 400
+            return jsonify({"error": "Audio reçu sans instructions claires ou langue non gérée par LuxASR."}), 400
     else:
         return jsonify({"error": "Type de contenu non supporté ou données manquantes"}), 400
 
@@ -143,37 +193,28 @@ def process_audio():
     if gemini_response:
         # --- Extraction du texte luxembourgeois pour la synthèse vocale ---
         lux_text_to_speak = ""
-        # Logique pour extraire la partie LU et la question de relance LU de la réponse de Gemini
         
-        # Prioriser l'extraction du texte après "LU :"
         if "LU :" in gemini_response:
             start_idx = gemini_response.find("LU :") + len("LU :")
-            # Cherche la fin de la réponse LU (avant "Question suivante LU :" ou "Question suivante DE :")
             end_idx_q_lu = gemini_response.find("Question suivante LU :", start_idx)
-            end_idx_q_de = gemini_response.find("Question suivante DE :", start_idx) # Au cas où Gemini fallback sur DE
+            end_idx_q_de = gemini_response.find("Question suivante DE :", start_idx) 
 
             if end_idx_q_lu != -1 and (end_idx_q_de == -1 or end_idx_q_lu < end_idx_q_de):
-                # Si "Question suivante LU" est présente et vient avant "Question suivante DE"
                 lux_text_to_speak = gemini_response[start_idx:end_idx_q_lu].strip()
             elif end_idx_q_de != -1:
-                # Si "Question suivante DE" est présente (Gemini a fallback sur DE)
                 lux_text_to_speak = gemini_response[start_idx:end_idx_q_de].strip()
             else:
-                # Si aucune question de relance n'est trouvée, prends jusqu'à la fin de la section LU
                 lux_text_to_speak = gemini_response[start_idx:].strip()
         else:
             # Si "LU :" n'est pas présent, cela signifie que Gemini a répondu sans le préfixe
-            # (par exemple, si la réponse était 100% LU sans ambiguïté ou formatage).
-            # On cherche alors directement la question de relance "Question suivante LU :"
             if "Question suivante LU :" in gemini_response:
                 split_text = gemini_response.split("Question suivante LU :", 1)
                 lux_text_to_speak = split_text[0].strip()
-            elif "Question suivante DE :" in gemini_response: # Fallback si Gemini a écrit la relance en DE
+            elif "Question suivante DE :" in gemini_response:
                 split_text = gemini_response.split("Question suivante DE :", 1)
                 lux_text_to_speak = split_text[0].strip()
             else:
                 lux_text_to_speak = gemini_response.strip()
-
 
         if lux_text_to_speak:
             print(f"Demande TTS pour le luxembourgeois : '{lux_text_to_speak}'")
@@ -193,6 +234,4 @@ def process_audio():
 # --- Démarrage de l'application Flask ---
 
 if __name__ == '__main__':
-    # Pour le déploiement sur Render, Gunicorn sera utilisé.
-    # Pour le développement local, utilisez app.run
     app.run(debug=True, host='127.0.0.1', port=5000)
