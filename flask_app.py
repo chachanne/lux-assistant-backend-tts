@@ -150,7 +150,13 @@ def process_audio():
                 # Envoyer la requête à la nouvelle URL LuxASR avec les paramètres
                 response_luxasr = requests.post(LUX_ASR_API_URL, params=params, headers=headers, files=files)
                 response_luxasr.raise_for_status() # Lève une exception pour les codes d'état HTTP d'erreur
-
+            # --- NOUVELLES LIGNES DE DÉBOGAGE POUR LUXASR ---
+            print(f"LuxASR Raw Response Status Code: {response_luxasr.status_code}")
+            print(f"LuxASR Raw Response Headers: {response_luxasr.headers}")
+            luxasr_raw_text = response_luxasr.text
+            print(f"LuxASR Raw Response Body (first 500 chars): {luxasr_raw_text[:500]}")
+            # --- FIN NOUVELLES LIGNES DE DÉBOGAGE -
+            
                 luxasr_result = response_luxasr.json()
                 
                 # Extrait le texte transcrit du JSON de LuxASR.
